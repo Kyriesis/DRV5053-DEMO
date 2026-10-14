@@ -53,6 +53,7 @@ buf_lock = threading.Lock()
 # 全局单调数据序号: 环形缓存满/清空/挤出时索引会滑动, 必须用它追踪投递进度
 st = {"epoch": 0, "seq": 0}                  # epoch: 重连新会话代数, seq: 绝对序号
 mon = {"want": True, "running": False}       # want=用户意图 running=串口实际状态
+_reader_stats = {"n": 0, "t0": 0}            # 设备速率统计
 
 HTML = r"""<!DOCTYPE html>
 <html lang="zh">
@@ -150,10 +151,11 @@ let recvCount = 0, lastMsgAt = Date.now();
 let wantMon = true, serverAlive = false, src = null;
 let curEpoch = -1;
 
-// 心跳: 显示接收速率; 检测到断流(Chrome冻结标签页会杀死SSE且不重连)
-// 主动重建连接, 服务器缓存可恢复最多80秒历史
+// 心跳(2秒周期): 显示接收速率(注意: 统计窗口为2秒, 需除以2换算成每秒);
+// 检测到断流(Chrome冻结标签页会杀死SSE且不重连)主动重建连接,
+// 服务器缓存可恢复最多80秒历史
 setInterval(() => {
-  document.getElementById('rate').textContent = recvCount;
+  document.getElementById('rate').textContent = Math.round(recvCount / 2);
   recvCount = 0;
   if (wantMon && serverAlive && Date.now() - lastMsgAt > 6000) {
     document.getElementById('status').textContent = '连接中断, 重连中...';
@@ -421,6 +423,14 @@ def _serial_reader_loop(port_name, baud):
         with buf_lock:
             st["seq"] += 1
             points.append((t, vr, vf))
+        # 设备实际输出速率统计 (每1000条记一次)
+        _reader_stats["n"] += 1
+        if _reader_stats["n"] >= 1000:
+            span = t - _reader_stats["t0"]
+            safe_print(f"[统计] 设备速率: 1000点跨度{span}ms "
+                       f"= {_reader_stats['n']*1000//max(1,span)}/s")
+            _reader_stats["n"] = 0
+            _reader_stats["t0"] = t
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -480,6 +490,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.end_headers()
         sent_seq = None        # 本连接下一个该发送的绝对序号
+        sent_pts, pushes, stat_t0 = 0, 0, time.time()
+        safe_print(f"[连接] {self.client_address} EventSource已建立")
         try:
             while True:
                 with buf_lock:
@@ -499,9 +511,17 @@ class Handler(BaseHTTPRequestHandler):
                          "gap": gap, "data": batch}, separators=(",", ":"))
                     self.wfile.write(f"data: {payload}\n\n".encode())
                     self.wfile.flush()
+                    sent_pts += len(batch)
+                    pushes += 1
+                    # 每10秒输出该连接的发送统计, 用于诊断速率异常
+                    if time.time() - stat_t0 >= 10:
+                        safe_print(f"[统计] {self.client_address} "
+                                   f"10秒发送 {sent_pts} 点 / {pushes} 批")
+                        sent_pts, pushes, stat_t0 = 0, 0, time.time()
                 time.sleep(0.04)        # 25Hz 推送
         except (BrokenPipeError, ConnectionResetError, OSError):
-            return
+            safe_print(f"[连接] {self.client_address} EventSource已断开 "
+                       f"(累计末段 {sent_pts} 点)")
 
 
 def pick_port():
