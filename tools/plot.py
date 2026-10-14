@@ -33,6 +33,8 @@ BUF_MAX = 40000            # 缓存点数 (500Hz x 80s, 供放大后回看)
 
 points = collections.deque(maxlen=BUF_MAX)   # (t_ms, v_raw, v_filt)
 buf_lock = threading.Lock()
+# 全局单调数据序号: 环形缓存满/清空/挤出时索引会滑动, 必须用它追踪投递进度
+st = {"epoch": 0, "seq": 0}                  # epoch: 重连新会话代数, seq: 绝对序号
 mon = {"want": True, "running": False}       # want=用户意图 running=串口实际状态
 
 HTML = r"""<!DOCTYPE html>
@@ -126,6 +128,7 @@ window.addEventListener('resize', resize); resize();
 // ---------- 数据流 ----------
 let recvCount = 0, lastMsgAt = Date.now();
 let wantMon = true, serverAlive = false, src = null;
+let curEpoch = -1;
 
 // 心跳: 显示接收速率; 检测到断流(Chrome冻结标签页会杀死SSE且不重连)
 // 主动重建连接, 服务器缓存可恢复最多80秒历史
@@ -148,9 +151,15 @@ function connectSSE() {
     if (src !== conn) { conn.close(); return; }  // 过期连接, 丢弃
     lastMsgAt = Date.now();
     const msg = JSON.parse(e.data);
-    recvCount += msg.data.length;
-    if (msg.start < lastIdx) data.length = 0;
+    // 会话切换/数据缺口 -> 清空重对齐; 重同步的大批量不计入接收速率
+    if (msg.epoch !== curEpoch || msg.gap) {
+      data.length = 0;
+      curEpoch = msg.epoch;
+    } else if (msg.start < lastIdx) {
+      data.length = 0;
+    }
     lastIdx = msg.start + msg.data.length;
+    if (msg.data.length <= 2000) recvCount += msg.data.length;
     // 防线: 设备复位(millis归零)导致时间戳倒退 -> 清空画面重绘
     if (data.length && msg.data.length &&
         msg.data[0][0] < data[data.length-1][0] - 2000) {
@@ -337,6 +346,7 @@ def serial_reader(port_name, baud):
                 # 重连意味着板子已复位, millis() 归零: 清空旧时间轴, 防止新旧数据混绘
                 with buf_lock:
                     points.clear()
+                    st["epoch"] += 1
                 print("[信息] 串口就绪, 等待数据...", flush=True)
             except (serial.SerialException, OSError) as e:
                 print(f"[警告] 无法打开串口: {e}, 2秒后重试", flush=True)
@@ -365,6 +375,7 @@ def serial_reader(port_name, baud):
         except ValueError:
             continue                    # 跳过文本行 (启动横幅等)
         with buf_lock:
+            st["seq"] += 1
             points.append((t, vr, vf))
 
 
@@ -415,20 +426,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        sent = 0
+        sent_seq = None        # 本连接下一个该发送的绝对序号
         try:
             while True:
                 with buf_lock:
-                    total = len(points)
-                    if total < sent:
-                        sent = 0         # 缓存已被清空(重启新会话), 本连接从头推送
-                    batch = [list(p) for p in list(points)[sent:]]
-                if batch:
-                    payload = json.dumps({"start": sent, "data": batch},
-                                         separators=(",", ":"))
+                    base = st["seq"] - len(points)     # points[0] 的绝对序号
+                    if sent_seq is None or sent_seq < base or sent_seq > st["seq"]:
+                        # None: 新连接; <base: 数据已被挤出或会话已清空 -> 重同步
+                        gap = sent_seq is not None and sent_seq < base
+                        sent_seq = base
+                    else:
+                        gap = False
+                    batch = [list(p) for p in list(points)[sent_seq - base:]]
+                    sent_seq = st["seq"]
+                    epoch = st["epoch"]
+                if batch or gap:
+                    payload = json.dumps(
+                        {"start": sent_seq - len(batch), "epoch": epoch,
+                         "gap": gap, "data": batch}, separators=(",", ":"))
                     self.wfile.write(f"data: {payload}\n\n".encode())
                     self.wfile.flush()
-                    sent = total
                 time.sleep(0.04)        # 25Hz 推送
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
