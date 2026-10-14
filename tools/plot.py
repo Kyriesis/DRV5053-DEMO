@@ -139,11 +139,13 @@ setInterval(() => {
 }, 2000);
 
 function connectSSE() {
-  if (src) src.close();
-  src = new EventSource('/events');
-  src.onopen = () => { lastMsgAt = Date.now(); };
-  src.onerror = () => { src.close(); lastMsgAt -= 7000; };  // 促使心跳尽快重建
-  src.onmessage = (e) => {
+  if (src) { try { src.close(); } catch (e) {} }
+  const conn = new EventSource('/events');   // 闭包固定本连接, 勿用全局src
+  src = conn;
+  conn.onopen = () => { if (src === conn) lastMsgAt = Date.now(); };
+  conn.onerror = () => { conn.close(); };    // 只关闭自己, 不碰新连接
+  conn.onmessage = (e) => {
+    if (src !== conn) { conn.close(); return; }  // 过期连接, 丢弃
     lastMsgAt = Date.now();
     const msg = JSON.parse(e.data);
     recvCount += msg.data.length;
