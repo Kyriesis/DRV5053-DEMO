@@ -18,6 +18,7 @@ DRV5053 实时电压/位置曲线监视器 (零第三方依赖, 仅需 pyserial)
 """
 import collections
 import json
+import socket
 import sys
 import threading
 import time
@@ -192,6 +193,17 @@ function draw() {
   }
   ctx.fillStyle = '#ef5350'; ctx.textAlign = 'left';
   ctx.fillText('QVO 1.0V', padL + 4, y(1.0) - 4);
+  // 图例
+  ctx.font = '12px "Segoe UI", "Microsoft YaHei", sans-serif';
+  const legend = [['rgba(143,163,184,0.6)', '原始'], ['#4ade80', '滤波'],
+                  ...(showPos.checked && cal.cvn !== cal.cvf ? [['#fb923c', '位置']] : [])];
+  let lx = padL + 90;
+  for (const [c, txt] of legend) {
+    ctx.strokeStyle = c; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(lx, y(1.0) - 6); ctx.lineTo(lx + 18, y(1.0) - 6); ctx.stroke();
+    ctx.lineWidth = 1; ctx.fillStyle = '#8b98a5'; ctx.fillText(txt, lx + 22, y(1.0) - 2);
+    lx += 70;
+  }
 
   // 右轴: 位置刻度
   const mmLo = Math.min(cal.cmf, cal.cmn), mmHi = Math.max(cal.cmf, cal.cmn);
@@ -220,8 +232,8 @@ function draw() {
                  x(tt), H - 8);
   }
 
-  // 电压曲线: 原始(灰) / 滤波(绿)
-  for (const [idx, c, lw] of [[1, '#8fa3b8', 1], [2, '#4ade80', 2]]) {
+  // 电压曲线: 原始(灰, 半透明作噪声参考) / 滤波(绿)
+  for (const [idx, c, lw] of [[1, 'rgba(143,163,184,0.35)', 1], [2, '#4ade80', 2]]) {
     ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.beginPath();
     let started = false;
     for (const p of data) {
@@ -375,6 +387,8 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 with buf_lock:
                     total = len(points)
+                    if total < sent:
+                        sent = 0         # 缓存已被清空(重启新会话), 本连接从头推送
                     batch = [list(p) for p in list(points)[sent:]]
                 if batch:
                     payload = json.dumps({"start": sent, "data": batch},
@@ -403,6 +417,16 @@ def main():
     baud = int(sys.argv[2]) if len(sys.argv) > 2 else 115200
     if not port_name:
         print("[错误] 找不到可用串口", flush=True)
+        sys.exit(1)
+
+    # 端口占用预检: Windows 的 SO_REUSEADDR 会让双实例"静默共存"导致混乱,
+    # 这里用不带 REUSE 的裸绑定强制独占
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", HTTP_PORT))
+        sock.close()
+    except OSError:
+        print(f"[错误] 端口 {HTTP_PORT} 已被占用, 请先关闭另一个 plot.bat 实例", flush=True)
         sys.exit(1)
 
     threading.Thread(target=serial_reader, args=(port_name, baud),
