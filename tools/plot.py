@@ -92,8 +92,8 @@ HTML = r"""<!DOCTYPE html>
     <div id="status">连接中...</div>
   </div>
   <div class="row">
-    <div class="cal">标定 远点 <input id="cvf" type="number" step="0.001" value="0.997"> V = <input id="cmf" type="number" step="0.1" value="0"> mm</div>
-    <div class="cal">近点 <input id="cvn" type="number" step="0.001" value="0.015"> V = <input id="cmn" type="number" step="0.1" value="10"> mm</div>
+    <div class="cal">标定 远点 <input id="cvf" type="number" step="0.001" value="0.997"> V = <input id="cmf" type="number" step="0.1" value="10"> mm</div>
+    <div class="cal">近点 <input id="cvn" type="number" step="0.001" value="0.015"> V = <input id="cmn" type="number" step="0.1" value="0"> mm</div>
     <label class="cal"><input type="checkbox" id="showpos" checked> 位置曲线</label>
     <div style="flex:1"></div>
     <button id="btnStart">启动监视</button>
@@ -110,15 +110,17 @@ const data = [];          // [t, raw, filt]
 let lastIdx = 0;
 
 // ---------- 标定: 两点线性映射 电压->位置 ----------
+// 存储键带版本前缀: 变更出厂默认时升级前缀, 避免浏览器里的旧存档盖住新默认值
+const CAL_KEY_VER = 'cal2_';
 const calIds = ['cvf', 'cmf', 'cvn', 'cmn'];
 const cal = {};
 for (const id of calIds) {
   const el = document.getElementById(id);
-  const saved = parseFloat(localStorage.getItem(id));
+  const saved = parseFloat(localStorage.getItem(CAL_KEY_VER + id));
   cal[id] = Number.isFinite(saved) ? saved : parseFloat(el.value);  // 注意: 0是合法值, 不能用||回退
   el.value = cal[id];
   el.onchange = () => { cal[id] = parseFloat(el.value) || 0;
-                        localStorage.setItem(id, el.value); };
+                        localStorage.setItem(CAL_KEY_VER + id, el.value); };
 }
 function voltToPos(v) {
   const dv = cal.cvn - cal.cvf;
