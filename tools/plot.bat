@@ -2,7 +2,7 @@
 chcp 65001 >nul
 REM DRV5053 实时电压曲线 - 双击运行
 REM Python查找优先级: PlatformIO venv ^> 系统PATH
-REM 运行前请关闭 VS Code 串口监视器 (会占用 COM 口)
+REM 已在运行则直接打开页面复用, 未运行则启动新实例
 
 set "PY=%USERPROFILE%\.platformio\penv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
@@ -25,5 +25,12 @@ if errorlevel 1 (
     "%PY%" -m pip install pyserial --quiet
 )
 
-"%PY%" -u "%~dp0plot.py" %*
+REM 检测服务器是否已在运行
+"%PY%" -c "import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',8080))==0 else 1)" >nul 2>&1
+if %errorlevel%==0 (
+    echo [信息] 服务器已在运行, 直接打开页面
+    start "" "http://localhost:8080"
+) else (
+    "%PY%" -u "%~dp0plot.py" %*
+)
 pause
