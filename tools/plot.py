@@ -128,6 +128,12 @@ src.onmessage = (e) => {
   const msg = JSON.parse(e.data);
   if (msg.start < lastIdx) data.length = 0;
   lastIdx = msg.start + msg.data.length;
+  // 防线: 设备复位(millis归零)导致时间戳倒退 -> 清空画面重绘
+  if (data.length && msg.data.length &&
+      msg.data[0][0] < data[data.length-1][0] - 2000) {
+    data.length = 0;
+    lastIdx = msg.start + msg.data.length;
+  }
   for (const p of msg.data) data.push(p);
   const cutoff = data.length ? data[data.length-1][0] - HISTORY_MS : 0;
   while (data.length && data[0][0] < cutoff) data.shift();
@@ -283,6 +289,9 @@ def serial_reader(port_name, baud):
                 print(f"[信息] 打开 {port_name} @ {baud} ...", flush=True)
                 ser = open_port(port_name, baud)
                 mon["running"] = True
+                # 重连意味着板子已复位, millis() 归零: 清空旧时间轴, 防止新旧数据混绘
+                with buf_lock:
+                    points.clear()
                 print("[信息] 串口就绪, 等待数据...", flush=True)
             except (serial.SerialException, OSError) as e:
                 print(f"[警告] 无法打开串口: {e}, 2秒后重试", flush=True)
