@@ -18,6 +18,7 @@ DRV5053 实时电压/位置曲线监视器 (零第三方依赖, 仅需 pyserial)
 """
 import collections
 import json
+import os
 import socket
 import sys
 import threading
@@ -30,6 +31,22 @@ from serial.tools import list_ports
 
 HTTP_PORT = 8080
 BUF_MAX = 40000            # 缓存点数 (500Hz x 80s, 供放大后回看)
+PAGE_VER = "2.2"           # 页面版本, 显示在顶栏便于区分新旧标签页
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plot.log")
+
+
+def safe_print(msg):
+    """打印到控制台并写入日志文件; 控制台异常(窗口被关/重定向)不得影响运行"""
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 points = collections.deque(maxlen=BUF_MAX)   # (t_ms, v_raw, v_filt)
 buf_lock = threading.Lock()
@@ -65,7 +82,7 @@ HTML = r"""<!DOCTYPE html>
 <body>
 <header>
   <div class="row">
-    <h1>DRV5053 曲线</h1>
+    <h1>DRV5053 曲线 <span style="color:#5b6774;font-size:11px" id="ver"></span></h1>
     <div class="val" id="vraw">原始 <b>--</b> V</div>
     <div class="val" id="vfilt">滤波 <b>--</b> V</div>
     <div class="val" id="pos">位置 <b>--</b> mm</div>
@@ -80,6 +97,9 @@ HTML = r"""<!DOCTYPE html>
     <div style="flex:1"></div>
     <button id="btnStart">启动监视</button>
     <button id="btnStop">停止监视</button>
+  </div>
+  <div id="tabwarn" style="display:none; padding:5px 16px; background:#5a3a1e; color:#f0b429; font-size:12px;">
+    ⚠ 检测到另一个曲线页面标签页也在运行 — 多个标签会互相干扰(接收率翻倍/断流), 请只保留一个, 其余关闭
   </div>
 </header>
 <canvas id="cv"></canvas>
@@ -204,6 +224,19 @@ document.getElementById('btnStop').onclick = () =>
 setInterval(pollStatus, 1000);
 pollStatus();
 
+// ---------- 多标签页检测 (多标签并存是接收率翻倍/断流的常见原因) ----------
+const tabId = Math.random().toString(36).slice(2);
+setInterval(() => {
+  const now = Date.now();
+  let rec = {};
+  try { rec = JSON.parse(localStorage.getItem('plot_tabs') || '{}'); } catch (e) {}
+  for (const k in rec) if (now - rec[k] > 5000) delete rec[k];
+  const others = Object.keys(rec).filter(k => k !== tabId);
+  rec[tabId] = now;
+  localStorage.setItem('plot_tabs', JSON.stringify(rec));
+  document.getElementById('tabwarn').style.display = others.length ? 'block' : 'none';
+}, 2000);
+
 // ---------- 绘图 ----------
 const Y_MAX = 2.0;      // 左轴: 电压 0~2V (5053 满量程 0.2~1.8V)
 function draw() {
@@ -324,6 +357,17 @@ def open_port(port_name, baud):
 
 
 def serial_reader(port_name, baud):
+    # 外层守护: 任何未预期异常只重启线程, 绝不拖垮进程
+    while True:
+        try:
+            _serial_reader_loop(port_name, baud)
+        except Exception as e:
+            safe_print(f"[错误] 读取线程异常: {e!r}, 3秒后重启线程")
+            mon["running"] = False
+            time.sleep(3)
+
+
+def _serial_reader_loop(port_name, baud):
     ser = None
     while True:
         if not mon["want"]:
@@ -335,28 +379,28 @@ def serial_reader(port_name, baud):
                     pass
                 ser = None
                 mon["running"] = False
-                print("[信息] 监视已停止, 串口已释放", flush=True)
+                safe_print("[信息] 监视已停止, 串口已释放")
             time.sleep(0.3)
             continue
         if ser is None:
             try:
-                print(f"[信息] 打开 {port_name} @ {baud} ...", flush=True)
+                safe_print(f"[信息] 打开 {port_name} @ {baud} ...")
                 ser = open_port(port_name, baud)
                 mon["running"] = True
                 # 重连意味着板子已复位, millis() 归零: 清空旧时间轴, 防止新旧数据混绘
                 with buf_lock:
                     points.clear()
                     st["epoch"] += 1
-                print("[信息] 串口就绪, 等待数据...", flush=True)
+                safe_print("[信息] 串口就绪, 等待数据...")
             except (serial.SerialException, OSError) as e:
-                print(f"[警告] 无法打开串口: {e}, 2秒后重试", flush=True)
-                print("提示: 检查 VS Code 串口监视器是否已关闭", flush=True)
+                safe_print(f"[警告] 无法打开串口: {e}, 2秒后重试")
+                safe_print("提示: 检查 VS Code 串口监视器是否已关闭")
                 time.sleep(2)
             continue
         try:
             line = ser.readline().decode("ascii", "ignore").strip()
         except (serial.SerialException, OSError) as e:
-            print(f"[警告] 串口异常: {e}, 1秒后重连", flush=True)
+            safe_print(f"[警告] 串口异常: {e}, 1秒后重连")
             try:
                 ser.close()
             except Exception:
@@ -393,7 +437,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            body = HTML.encode("utf-8")
+            body = HTML.replace('id="ver"></span>',
+                                f'id="ver">v{PAGE_VER}</span>').encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -403,7 +448,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/events":
             self.serve_events()
         elif self.path == "/status":
-            self._json({"running": mon["running"], "want": mon["want"]})
+            self._json({"running": mon["running"], "want": mon["want"],
+                        "ver": PAGE_VER})
         elif self.path.startswith("/control"):
             action = ""
             if "?" in self.path:
@@ -412,16 +458,22 @@ class Handler(BaseHTTPRequestHandler):
                         action = kv.split("=", 1)[1]
             if action == "start":
                 mon["want"] = True
-                print("[信息] 用户启动监视", flush=True)
+                safe_print("[信息] 用户启动监视")
             elif action == "stop":
                 mon["want"] = False
-                print("[信息] 用户停止监视", flush=True)
+                safe_print("[信息] 用户停止监视")
             self._json({"ok": True, "want": mon["want"]})
         else:
             self.send_response(404)
             self.end_headers()
 
     def serve_events(self):
+        try:
+            self._serve_events_inner()
+        except Exception:
+            return                  # 单连接异常不得影响其他连接
+
+    def _serve_events_inner(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -467,7 +519,7 @@ def main():
     port_name = sys.argv[1] if len(sys.argv) > 1 else pick_port()
     baud = int(sys.argv[2]) if len(sys.argv) > 2 else 115200
     if not port_name:
-        print("[错误] 找不到可用串口", flush=True)
+        safe_print("[错误] 找不到可用串口")
         sys.exit(1)
 
     # 端口占用预检: Windows 的 SO_REUSEADDR 会让双实例"静默共存"导致混乱,
@@ -477,16 +529,21 @@ def main():
         sock.bind(("127.0.0.1", HTTP_PORT))
         sock.close()
     except OSError:
-        print(f"[错误] 端口 {HTTP_PORT} 已被占用, 请先关闭另一个 plot.bat 实例", flush=True)
+        safe_print(f"[错误] 端口 {HTTP_PORT} 已被占用, 请先关闭另一个 plot.bat 实例")
         sys.exit(1)
 
     threading.Thread(target=serial_reader, args=(port_name, baud),
                      daemon=True).start()
 
     server = ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), Handler)
-    print(f"[信息] 曲线页面: http://localhost:{HTTP_PORT}", flush=True)
+    safe_print(f"[信息] 曲线页面: http://localhost:{HTTP_PORT}")
     webbrowser.open(f"http://localhost:{HTTP_PORT}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        safe_print(f"[错误] 服务器异常退出: {e!r}")
 
 
 if __name__ == "__main__":
