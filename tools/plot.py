@@ -124,41 +124,57 @@ function resize() {
 window.addEventListener('resize', resize); resize();
 
 // ---------- 数据流 ----------
-let recvCount = 0;                    // 接收速率统计
+let recvCount = 0, lastMsgAt = Date.now();
+let wantMon = true, serverAlive = false, src = null;
+
+// 心跳: 显示接收速率; 检测到断流(Chrome冻结标签页会杀死SSE且不重连)
+// 主动重建连接, 服务器缓存可恢复最多80秒历史
 setInterval(() => {
   document.getElementById('rate').textContent = recvCount;
   recvCount = 0;
-}, 1000);
+  if (wantMon && serverAlive && Date.now() - lastMsgAt > 6000) {
+    document.getElementById('status').textContent = '连接中断, 重连中...';
+    connectSSE();
+  }
+}, 2000);
 
-const src = new EventSource('/events');
-src.onerror = () => { document.getElementById('status').dataset.link = '0'; };
-src.onmessage = (e) => {
-  const msg = JSON.parse(e.data);
-  if (msg.start < lastIdx) data.length = 0;
-  lastIdx = msg.start + msg.data.length;
-  // 防线: 设备复位(millis归零)导致时间戳倒退 -> 清空画面重绘
-  if (data.length && msg.data.length &&
-      msg.data[0][0] < data[data.length-1][0] - 2000) {
-    data.length = 0;
+function connectSSE() {
+  if (src) src.close();
+  src = new EventSource('/events');
+  src.onopen = () => { lastMsgAt = Date.now(); };
+  src.onerror = () => { src.close(); lastMsgAt -= 7000; };  // 促使心跳尽快重建
+  src.onmessage = (e) => {
+    lastMsgAt = Date.now();
+    const msg = JSON.parse(e.data);
+    recvCount += msg.data.length;
+    if (msg.start < lastIdx) data.length = 0;
     lastIdx = msg.start + msg.data.length;
-  }
-  for (const p of msg.data) data.push(p);
-  recvCount += msg.data.length;
-  const cutoff = data.length ? data[data.length-1][0] - HISTORY_MS : 0;
-  while (data.length && data[0][0] < cutoff) data.shift();
-  if (msg.data.length) {
-    const last = msg.data[msg.data.length-1];
-    document.querySelector('#vraw b').textContent = last[1].toFixed(3);
-    document.querySelector('#vfilt b').textContent = last[2].toFixed(3);
-    const p = voltToPos(last[2]);
-    document.querySelector('#pos b').textContent = p === null ? '--' : p.toFixed(2);
-  }
-};
+    // 防线: 设备复位(millis归零)导致时间戳倒退 -> 清空画面重绘
+    if (data.length && msg.data.length &&
+        msg.data[0][0] < data[data.length-1][0] - 2000) {
+      data.length = 0;
+      lastIdx = msg.start + msg.data.length;
+    }
+    for (const p of msg.data) data.push(p);
+    const cutoff = data.length ? data[data.length-1][0] - HISTORY_MS : 0;
+    while (data.length && data[0][0] < cutoff) data.shift();
+    if (msg.data.length) {
+      const last = msg.data[msg.data.length-1];
+      document.querySelector('#vraw b').textContent = last[1].toFixed(3);
+      document.querySelector('#vfilt b').textContent = last[2].toFixed(3);
+      const p = voltToPos(last[2]);
+      document.querySelector('#pos b').textContent = p === null ? '--' : p.toFixed(2);
+    }
+  };
+}
+connectSSE();
 
 // ---------- 启动/停止监视 ----------
 async function pollStatus() {
   try {
     const j = await (await fetch('/status')).json();
+    serverAlive = true;
+    wantMon = j.want;
     const st = document.getElementById('status');
     if (j.running)      { st.textContent = '监视中'; }
     else if (j.want)    { st.textContent = '连接中...'; }
@@ -166,6 +182,7 @@ async function pollStatus() {
     document.getElementById('btnStart').disabled = j.want;
     document.getElementById('btnStop').disabled = !j.want;
   } catch {
+    serverAlive = false;
     document.getElementById('status').textContent = '服务无响应';
   }
 }
@@ -270,10 +287,12 @@ function draw() {
 }
 // 绘图调度: 前台用rAF(流畅60fps); 后台标签页Chrome会暂停rAF,
 // 用定时器兜底慢速刷新(~1fps), 保证监视画面持续更新
+// try/catch兜底: 单次绘制异常不得杀死渲染循环
 let lastDraw = 0;
-function rafLoop() { draw(); lastDraw = Date.now(); requestAnimationFrame(rafLoop); }
+function safeDraw() { try { draw(); } catch (e) {} lastDraw = Date.now(); }
+function rafLoop() { safeDraw(); requestAnimationFrame(rafLoop); }
 requestAnimationFrame(rafLoop);
-setInterval(() => { if (Date.now() - lastDraw > 400) draw(); }, 200);
+setInterval(() => { if (Date.now() - lastDraw > 400) safeDraw(); }, 200);
 </script>
 </body>
 </html>"""
