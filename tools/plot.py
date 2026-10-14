@@ -397,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")   # 防止浏览器用旧缓存页面
             self.end_headers()
             self.wfile.write(body)
         elif self.path == "/events":
