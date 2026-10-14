@@ -114,7 +114,8 @@ const calIds = ['cvf', 'cmf', 'cvn', 'cmn'];
 const cal = {};
 for (const id of calIds) {
   const el = document.getElementById(id);
-  cal[id] = parseFloat(localStorage.getItem(id)) || parseFloat(el.value);
+  const saved = parseFloat(localStorage.getItem(id));
+  cal[id] = Number.isFinite(saved) ? saved : parseFloat(el.value);  // 注意: 0是合法值, 不能用||回退
   el.value = cal[id];
   el.onchange = () => { cal[id] = parseFloat(el.value) || 0;
                         localStorage.setItem(id, el.value); };
