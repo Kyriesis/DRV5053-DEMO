@@ -68,6 +68,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="val" id="vfilt">滤波 <b>--</b> V</div>
     <div class="val" id="pos">位置 <b>--</b> mm</div>
     <div class="val">窗口 <b id="win">15s</b> <span style="color:#7a8794;font-size:11px">(滚轮缩放 1~60s)</span></div>
+    <div class="val">接收 <b id="rate">--</b><span style="color:#7a8794;font-size:11px">/s</span></div>
     <div id="status">连接中...</div>
   </div>
   <div class="row">
@@ -123,6 +124,12 @@ function resize() {
 window.addEventListener('resize', resize); resize();
 
 // ---------- 数据流 ----------
+let recvCount = 0;                    // 接收速率统计
+setInterval(() => {
+  document.getElementById('rate').textContent = recvCount;
+  recvCount = 0;
+}, 1000);
+
 const src = new EventSource('/events');
 src.onerror = () => { document.getElementById('status').dataset.link = '0'; };
 src.onmessage = (e) => {
@@ -136,6 +143,7 @@ src.onmessage = (e) => {
     lastIdx = msg.start + msg.data.length;
   }
   for (const p of msg.data) data.push(p);
+  recvCount += msg.data.length;
   const cutoff = data.length ? data[data.length-1][0] - HISTORY_MS : 0;
   while (data.length && data[0][0] < cutoff) data.shift();
   if (msg.data.length) {
@@ -216,7 +224,7 @@ function draw() {
   ctx.save(); ctx.translate(W - 10, padT + ph / 2); ctx.rotate(Math.PI / 2);
   ctx.textAlign = 'center'; ctx.fillText('mm', 0, 0); ctx.restore();
 
-  if (data.length < 2) { requestAnimationFrame(draw); return; }
+  if (data.length < 2) return;
 
   const t1 = data[data.length-1][0], t0 = t1 - windowMs;
   const x = t => padL + pw * (t - t0) / windowMs;
@@ -259,9 +267,13 @@ function draw() {
     }
     ctx.stroke(); ctx.setLineDash([]);
   }
-  requestAnimationFrame(draw);
 }
-requestAnimationFrame(draw);
+// 绘图调度: 前台用rAF(流畅60fps); 后台标签页Chrome会暂停rAF,
+// 用定时器兜底慢速刷新(~1fps), 保证监视画面持续更新
+let lastDraw = 0;
+function rafLoop() { draw(); lastDraw = Date.now(); requestAnimationFrame(rafLoop); }
+requestAnimationFrame(rafLoop);
+setInterval(() => { if (Date.now() - lastDraw > 400) draw(); }, 200);
 </script>
 </body>
 </html>"""
